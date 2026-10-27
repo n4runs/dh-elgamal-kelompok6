@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Program Diffie-Hellman dan ElGamal - Kelompok 6</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--tx:#1d2330;--mut:#5b6475;--ac:#1f5fbf;--bd:#d5d9e3;--cd:#f0f2f7}
+@media(prefers-color-scheme:dark){:root{--bg:#14171f;--card:#1c202b;--tx:#e6e9f0;--mut:#9aa3b5;--ac:#6ea4ff;--bd:#323848;--cd:#12151c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,sans-serif}
+main{max-width:900px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 4px}
+.sub{color:var(--mut);font-size:13px;margin:2px 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin:10px 0}
+.card p{margin:0 0 8px;color:var(--mut);font-size:13px}
+label{font-size:13px;color:var(--mut);display:block;margin:6px 0 2px}
+input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);font:inherit}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer;margin:4px 6px 4px 0}
+button.alt{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+pre{background:var(--cd);border-radius:6px;padding:8px 10px;margin:8px 0 0;overflow-x:auto;white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;min-height:0}
+pre:empty{display:none}
+.tag{display:inline-block;font-size:11px;background:var(--ac);color:#fff;border-radius:4px;padding:1px 6px;margin-right:6px}
+</style>
+</head>
+<body>
+<main>
+<h1>Program Diffie-Hellman dan ElGamal</h1>
+<div class="sub">Kelompok 6: Rahmad (5027241068), Nanda (5027241057), Naruna (5027241105)<br>
+Studi kasus: Dosen (Alice) mengirim data nilai rahasia ke Bagian Akademik (Bob), disadap Eve. Tanpa library atau framework; semua algoritma ditulis sendiri.</div>
+
+<div class="card">
+<div class="row">
+<div><label>Panjang bit p</label>
+<select id="bits"><option>32</option><option selected>64</option><option>128</option></select></div>
+<div><label>Seed pembangkit acak (angka)</label><input id="seed" value="20261025"></div>
+</div>
+<label>Pesan nilai rahasia (dienkripsi ElGamal)</label>
+<textarea id="msg" rows="2">NIM 2024001 NILAI UAS KRIPTOGRAFI = A</textarea>
+<button id="all">Jalankan semua tahap</button>
+<button id="reset" class="alt">Reset</button>
+</div>
+<div id="steps"></div>
+<div class="sub">Untuk pembelajaran: pembangkit acak bukan CSPRNG dan kunci dibuat kecil agar cepat. Pada praktik nyata p minimal 2048 bit.</div>
+</main>
+<script>
+"use strict";
+// ===== Primitif matematika (BigInt bawaan bahasa, bukan library) =====
+const M64 = (1n << 64n) - 1n;
+class PRNG {                       // SplitMix64
+  constructor(s) { this.s = BigInt(s) & M64; }
+  n64() {
+    this.s = (this.s + 0x9E3779B97F4A7C15n) & M64;
+    let z = this.s;
+    z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & M64;
+    z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & M64;
+    return z ^ (z >> 31n);
+  }
+  bits(n, top) {
+    let r = 0n, g = 0;
+    while (g < n) { r = (r << 64n) | this.n64(); g += 64; }
+    r &= (1n << BigInt(n)) - 1n;
+    if (top) r |= 1n << BigInt(n - 1);
+    return r;
+  }
+  range(lo, hi) {                  // acak pada [lo, hi)
+    const sp = hi - lo, n = sp.toString(2).length;
+    for (;;) { const r = this.bits(n); if (r < sp) return lo + r; }
+  }
+}
+function modPow(b, e, m) {         // square-and-multiply
+  let r = 1n; b %= m;
+  while (e > 0n) { if (e & 1n) r = (r * b) % m; b = (b * b) % m; e >>= 1n; }
+  return r;
+}
+function egcd(a, b) {
+  let x0 = 1n, y0 = 0n, x1 = 0n, y1 = 1n;
+  while (b !== 0n) {
+    const q = a / b;
+    [a, b] = [b, a - q * b]; [x0, x1] = [x1, x0 - q * x1]; [y0, y1] = [y1, y0 - q * y1];
+  }
+  return [a, x0, y0];
+}
+function inv(a, m) {
+  const [g, x] = egcd(((a % m) + m) % m, m);
+  if (g !== 1n) throw new Error("invers modular tidak ada");
+  return ((x % m) + m) % m;
+}
+const SMALL = [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n];
+function isPrime(n) {              // Miller-Rabin
+  if (n < 2n) return false;
+  for (const p of SMALL) { if (n === p) return true; if (n % p === 0n) return false; }
+  let d = n - 1n, s = 0;
+  while (d % 2n === 0n) { d /= 2n; s++; }
+  for (const a of SMALL) {
+    let x = modPow(a, d, n);
+    if (x === 1n || x === n - 1n) continue;
+    let ok = false;
+    for (let i = 0; i < s - 1; i++) { x = (x * x) % n; if (x === n - 1n) { ok = true; break; } }
+    if (!ok) return false;
+  }
+  return true;
+}
+function safePrime(bits, rng) {    // p = 2q + 1, q prima
+  for (;;) {
+    const q = rng.bits(bits - 1, true) | 1n;
+    if (isPrime(q)) { const p = 2n * q + 1n; if (isPrime(p)) return [p, q]; }
+  }
+}
+function generator(p, q) {         // p-1 = 2q -> cukup cek g^2 dan g^q
+  let g = 2n;
+  while (!(modPow(g, 2n, p) !== 1n && modPow(g, q, p) !== 1n)) g++;
+  return g;
+}
+
+// ===== Tahap Diffie-Hellman dan ElGamal =====
+const dhPublik = (g, priv, p) => modPow(g, priv, p);          // A = g^a
+const dhBersama = (pubLawan, priv, p) => modPow(pubLawan, priv, p); // K = B^a
+const egEnc = (m, p, g, y, rng) => { const k = rng.range(2n, p - 1n); return [k, modPow(g, k, p), (m * modPow(y, k, p)) % p]; };
+const egDec = (c1, c2, x, p) => { const s = modPow(c1, x, p), si = inv(s, p); return [s, si, (c2 * si) % p]; };
+const ks = (bytes, K) => { const r = new PRNG(K); return bytes.map(b => b ^ Number(r.n64() & 255n)); };
+const hex = a => a.map(b => b.toString(16).padStart(2, "0")).join("");
+const sh = (n, m = 24) => { n = String(n); return n.length <= m ? n : n.slice(0, m - 13) + "..." + n.slice(-9); };
+const KODE = "AKADEMIK-2026";
+const S = {};
+const need = k => { if (S[k] === undefined) throw new Error("Jalankan tahap sebelumnya terlebih dahulu."); };
+
+const STEPS = [
+ ["s0", "0", "Parameter publik (p, g)", "Fungsi: p dan g boleh diketahui siapa saja, termasuk Eve. Semua hitungan terjadi di grup perkalian mod p.", () => {
+   S.rng = new PRNG($("seed").value || 1);
+   const [p, q] = safePrime(+$("bits").value, S.rng);
+   for (const k of Object.keys(S)) if (k !== "rng") delete S[k];
+   S.p = p; S.q = q; S.g = generator(p, q);
+   return [`p (prima aman, ${p.toString(2).length} bit) = ${p}`, `q = (p-1)/2 = ${q}`, `g (akar primitif) = ${S.g}`]; }],
+ ["d1", "DH-1/2", "Kunci Alice dan Bob", "Fungsi: a dan b RAHASIA; A = g^a mod p dan B = g^b mod p boleh dikirim terbuka.", () => {
+   need("p");
+   S.a = S.rng.range(2n, S.p - 1n); S.A = dhPublik(S.g, S.a, S.p);
+   S.b = S.rng.range(2n, S.p - 1n); S.B = dhPublik(S.g, S.b, S.p);
+   return [`Alice: a (privat) = ${S.a}`, `       A = g^a mod p = ${S.A}`, `Bob  : b (privat) = ${S.b}`, `       B = g^b mod p = ${S.B}`]; }],
+ ["d2", "DH-3/4", "Pertukaran dan kunci bersama", "Fungsi: A dan B dikirim lewat kanal terbuka; keduanya menghitung K yang sama tanpa mengirim K.", () => {
+   need("A");
+   const ka = dhBersama(S.B, S.a, S.p), kb = dhBersama(S.A, S.b, S.p);
+   if (ka !== kb) throw new Error("Diffie-Hellman gagal");
+   S.K = ka;
+   return [`Alice --> Bob : A = ${sh(S.A)}`, `Bob --> Alice : B = ${sh(S.B)}`, `Eve menyadap   : p, g, A, B (tidak cukup untuk K)`,
+     `Alice: K = B^a mod p = ${ka}`, `Bob  : K = A^b mod p = ${kb}`, `Kunci sama? ${ka === kb}`]; }],
+ ["d3", "DH-5", "Kunci sesi mengamankan kode verifikasi", "Fungsi: DH hanya menyepakati kunci; kunci itu dipakai cipher simetris (XOR keystream).", () => {
+   need("K");
+   const data = [...new TextEncoder().encode(KODE)], enc = ks(data, S.K);
+   const dec = new TextDecoder().decode(new Uint8Array(ks(enc, S.K)));
+   return [`Kode asli (Alice)     : ${KODE}`, `Dikirim (hex, publik) : ${hex(enc)}`, `Dibuka Bob dengan K   : ${dec} -> ${dec === KODE ? "COCOK" : "GAGAL"}`]; }],
+ ["e1", "EG-1", "Kunci ElGamal Bob", "Fungsi: x = kunci PRIVAT Bob; y = g^x mod p = kunci PUBLIK yang dibagikan ke Alice.", () => {
+   need("p");
+   S.x = S.rng.range(2n, S.p - 1n); S.y = modPow(S.g, S.x, S.p);
+   delete S.cipher;
+   return [`x (privat) = ${S.x}`, `y (publik) = ${S.y}`, `Kunci publik Bob = (p, g, y)`]; }],
+ ["e2", "EG-2", "Alice mengenkripsi pesan", "Fungsi: tiap karakter m = kode Unicode; k acak baru; c1 = g^k mod p; c2 = m * y^k mod p.", () => {
+   need("y");
+   const msg = $("msg").value || "NILAI A";
+   const chars = [...msg];
+   S.msg = msg; S.cipher = chars.map(ch => egEnc(BigInt(ch.codePointAt(0)), S.p, S.g, S.y, S.rng));
+   const L = [`Pesan asli: ${msg}`, "Kar  m    k                   c1                        c2"];
+   S.cipher.slice(0, 6).forEach(([k, c1, c2], i) => L.push(`${JSON.stringify(chars[i]).padEnd(5)}${String(chars[i].codePointAt(0)).padEnd(5)}${sh(k, 18).padEnd(20)}${sh(c1).padEnd(26)}${sh(c2)}`));
+   if (chars.length > 6) L.push(`... ${chars.length - 6} karakter lainnya disingkat`);
+   L.push(`Total ciphertext: ${chars.length} pasang (c1, c2)`);
+   return L; }],
+ ["e3", "EG-3", "Bob mendekripsi", "Fungsi: s = c1^x mod p; m = c2 * s^-1 mod p. Butuh kunci privat x.", () => {
+   need("cipher");
+   const L = [];
+   S.cipher.slice(0, 3).forEach(([, c1, c2], i) => { const [s, si, m] = egDec(c1, c2, S.x, S.p); L.push(`blok ${i + 1}: s = ${sh(s, 18)}, s^-1 = ${sh(si, 18)}, m = ${m} -> ${JSON.stringify(String.fromCodePoint(Number(m)))}`); });
+   const out = S.cipher.map(([, c1, c2]) => String.fromCodePoint(Number(egDec(c1, c2, S.x, S.p)[2]))).join("");
+   L.push("", `Plaintext hasil dekripsi Bob: ${out}`, `Sama dengan pesan asli? ${out === S.msg}`);
+   return L; }],
+ ["c1", "C-1", "ElGamal bersifat probabilistik", "Fungsi: k berbeda tiap enkripsi, sehingga pola pesan tidak bocor.", () => {
+   need("cipher");
+   const dua = [...S.msg].map(ch => egEnc(BigInt(ch.codePointAt(0)), S.p, S.g, S.y, S.rng));
+   const out = dua.map(([, c1, c2]) => String.fromCodePoint(Number(egDec(c1, c2, S.x, S.p)[2]))).join("");
+   return [`c1 pertama : ${sh(S.cipher[0][1])}`, `c1 kedua   : ${sh(dua[0][1])}`, `Ciphertext berbeda? ${S.cipher[0][1] !== dua[0][1]}`, `Keduanya terdekripsi sama? ${out === S.msg}`]; }],
+ ["c2", "C-2", "Eve menyerang DH pada parameter kecil (20 bit)", "Fungsi: menunjukkan bahwa logaritma diskrit bisa dipecahkan jika p kecil.", () => {
+   need("p");
+   const [pk, qk] = safePrime(20, S.rng), gk = generator(pk, qk);
+   const a = S.rng.range(2n, pk - 1n), b = S.rng.range(2n, pk - 1n);
+   const A = modPow(gk, a, pk), B = modPow(gk, b, pk);
+   const P = Number(pk), G = Number(gk), AA = Number(A);
+   let cur = 1, tebak = 0, n = 0;
+   for (let e = 1; e < P; e++) { cur = (cur * G) % P; n++; if (cur === AA) { tebak = e; break; } }
+   const Ke = modPow(B, BigInt(tebak), pk), Ka = modPow(B, a, pk);
+   return [`p kecil = ${pk}, g = ${gk}, Eve tahu A = ${A}, B = ${B}`, `Eve menemukan a = ${tebak} setelah ${n} langkah`, `Kunci curian Eve = ${Ke} | kunci asli = ${Ka} | JEBOL? ${Ke === Ka}`]; }],
+ ["c3", "C-3", "Serangan yang sama pada p studi kasus", "Fungsi: menunjukkan mengapa p harus besar.", () => {
+   need("p");
+   const tahun = S.p / 10000000n / 31536000n;
+   return [`Perkiraan langkah brute force : sekitar ${S.p}`, `Pada 10 juta percobaan/detik   : sekitar ${tahun} tahun`, "Keamanan DH dan ElGamal bertumpu pada sulitnya logaritma diskrit."]; }],
+ ["kc", "Demo", "Demo angka kecil (p = 23, g = 5)", "Bisa diverifikasi dengan kalkulator.", () => {
+   const p = 23n, g = 5n, a = 6n, b = 15n, x = 6n, m = 10n, k = 3n;
+   const A = modPow(g, a, p), B = modPow(g, b, p), y = modPow(g, x, p);
+   const c1 = modPow(g, k, p), c2 = (m * modPow(y, k, p)) % p, [s, si, m2] = egDec(c1, c2, x, p);
+   return [`DH: A = 5^6 mod 23 = ${A}, B = 5^15 mod 23 = ${B}`, `K Alice = B^a = ${modPow(B, a, p)}, K Bob = A^b = ${modPow(A, b, p)}`,
+     `ElGamal: y = 5^6 mod 23 = ${y}; m = ${m}, k = ${k}`, `c1 = ${c1}, c2 = ${c2}`, `s = c1^x = ${s}, s^-1 = ${si}, m = ${m2} (sama? ${m2 === m})`]; }],
+];
+
+const $ = id => document.getElementById(id);
+function run(id) {
+  const st = STEPS.find(s => s[0] === id), box = $("o_" + id);
+  try { box.textContent = st[4]().join("\n"); }
+  catch (e) { box.textContent = "Peringatan: " + e.message; }
+}
+const host = $("steps");
+for (const [id, tag, title, desc] of STEPS) {
+  const c = document.createElement("div");
+  c.className = "card";
+  c.innerHTML = `<h2><span class="tag">${tag}</span>${title}</h2><p>${desc}</p><button data-id="${id}">Jalankan</button><pre id="o_${id}"></pre>`;
+  host.appendChild(c);
+}
+host.addEventListener("click", e => { const id = e.target.dataset && e.target.dataset.id; if (id) run(id); });
+$("all").onclick = () => { for (const s of STEPS) run(s[0]); };
+$("reset").onclick = () => { for (const k of Object.keys(S)) delete S[k]; document.querySelectorAll("pre").forEach(p => p.textContent = ""); };
+</script>
+</body>
+</html>
